@@ -1,0 +1,324 @@
+---
+title: "Final Project"
+author: "Riya Chaturvedi"
+date: "2025-05-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Predicting Tracheal, Bronchus and Lung Cancer Deaths in India using Air Quality Data
+
+### Final project: Machine Learning for Public Health
+### Riya Chaturvedi
+
+## I. INTRODUCTION & BACKGROUND 
+
+India has been experiencing worsening air quality over the past 5 years. New Delhi, bearing the brunt of this crisis, sees AQI levels exceed 800 almost annually, particularly in the periods of September-December. Meanwhile, Air Quality Index benchmarks a levels of 100 to be unsuitable for breathing. India's air pollution crisis has created a public health burden with the population increasingly facing lung and respiratory issues, developing chronic illnesses and exacerbating current ones. A study by Jagannathan et al. (2024) found that long-term exposure to air pollution increased deaths by 1.5 million per year in India, when compared to conditions if India met the World Health Organization’s recommendations for safe exposure. 
+
+While Delhi is at the forefrunt of the crisis, states in other regions of India also face increasing air pollution levels 2016 onwards, contributing to the public health crisis. 
+
+This project aims to predict lung cancer deaths in India using air quality data, such as NO2, SO2, PM 2.5 AND PM 10 levels, among other relevant variables. The aim of this model is to eventually predict the long-run impact of worsening air quality in the country, especially since effects of air pollution are observed in lags. Moreover, by predicting lung cancer mortality over a period of time, we can quantify the effects of worsening air quality and also anticipate the additional public health or cancer infrastructural burden that will fall on India's health system. 
+
+Given the size of the dataset and several missing values, I use two ML methods to train and predict the data- using the best model to make the predictions. Due to the data set being small, I use a Bootstrapped Lasso-regularized regression and given many missing values in the data set I also implement an XGBoost model that is adept in dealing with missingness of data. I will compare the RMSE and MSE's of the two models. 
+
+## II. DATA & STUDY DESIGN 
+
+For this project I use a dataset that I created using sources like the IHME Global Burden of Disease data for Indian states and India's National Family Health Survey 5 (2019-21). For air quality data, I used India's Central Pollution Control Board's (CPCB) AQI repository. The final dataset covers 33 Indian states between 2017-21, containing the following relevant variables- 
+
+1. State: Name of Indian State
+2. Year
+3. tbl_deaths: Tracheal, Bronchal or Lung Cancer deaths (raw number) (IHME)
+4. SO2: SO2 concentration in µg/m3 (CPCB)
+5. NO2: NO2 concentration in µg/m3 (CPCB)
+6. PM10: PM 10 concentration in µg/m3 (CPCB)
+7. PM2.5: PM2.5 concentration in µg/m3 (CPCB)
+8. Population: total population in each state (IHME)
+9. total_tobacco_rate: Total % of population that uses tobacco in any form in each state (NFHS Prediction- Halder et al. 2024)
+10. male_tobacco_perc: % of Men that use any type of tobacco in each state (NFHS-5) (data for only 2019-21)
+11. female_tobacco_perc:  % of Women that use any type of tobacco in each state (NFHS-5) (data for only 2019-21)
+12. hale: Health-adjusted Life Expectancy at birth (0-6months) to control for population health differences in each state (IHME)
+13. covid_deaths: Covid-19 total number of deaths in each state for each year (0 before 2020), using this in order to account for the changes in air quality between 2020-21 as well as the possible impact of Covid-19 infections on those with comorbidities like lung cancer. This variable aims to capture the extend of the impact fo Covid-19 (IHME)
+14. tbl_rate: Tracheal, Bronchus and Lung Cancer Rates -- main outcome feature (IHME)
+
+```{r}
+data <- read.csv("C:/Users/Riya/Downloads/final_data5.csv")
+head(data)
+```
+**Dataset creation & calculations**
+
+* All air quality data was calculated by averaging over each monitoring station in each city of each state for each year in the dataset. The final figures represent the mean of the maximum concentration recorded in each state's monitoring station, I averaged over the maximum in order to best represent the exposure of residents. 
+* Male & Female tobacco use rate data was taken from NFHS-5, covering 2019-21. There was no data on male and female tobacco use rates by state for 2017-18. Authors Halder et al. (2024) predict total tobacco use by state for 2017 & 2018, but there was no demarcation by sex. Thus, the data set has total tobacco use rate for 2017-18 and demarcated by sex rates for 2019-21. For 2019-21, I will calculate a total tobacco use rate by taking an average of the male and female tobacco use rates. While this method is imperfect, there is no reliable gendered population data that yields trustworthy results. I tried to use available data to find the population of men and women using tobacco in each state, total it and divide it by the total population number but for unknown reasons, the calculated values seemed overestimated (e.g. total smoking rate doubled between 2018 and 2019- unlikely)
+
+```{r}
+library(tidyverse)
+data <- data %>%
+  mutate(total_tobacco_rate = ifelse(Year >= 2019,
+                                     (male_tobacco_perc + female_tobacco_perc)/2,total_tobacco_rate)
+  )
+## ensuring all relevant variables are numeric
+data$SO2 <- as.numeric(data$SO2)
+data$NO2 <- as.numeric(data$NO2)
+```
+
+
+I will also be using lagged PM10 and PM2.5 levels to aid the analysis, given that the health effects of worsening air quality can be observed in lags. 
+```{r}
+data <- data %>%
+  arrange(State, Year) %>%
+  group_by(State) %>%
+  mutate(
+    PM2.5_lag1 = lag(PM2.5, 1),
+    PM10_lag1 = lag(PM10, 1)
+  ) 
+```
+
+Summarizing Data
+```{r}
+data %>%
+  select(-State, -Year) %>%
+  summary()
+```
+
+**Study Design**
+
+- **Bootstrapped Lasso Regression**:  
+  - Uses `cv.glmnet()` to automatically select the optimal lambda.  
+  - Bootstrapping ensures robust model estimation, particularly given the small size of the data 
+  - Regularization reduces the sensitivity of parameter estimates to the limited amount of available data.
+  - To deal with missing data, use median imputation method- will likely reduce the reliability of the results 
+    and produce larger prediction errors. 
+
+- **XGBoost Regression**:  
+  - Handles missing data internally.  
+  - Optimized parameters chosen for robustness and generalizability.
+  - Captures non-linear realtionships well
+  - However,less interpretable than lasso regression 
+  
+- **Evaluation & Model Comparison**:
+  - Using Root Mean-Squared error as it is good for continuous outcome variables (tbl_rate)
+  - Hyperparameter tuning using bootstrapping for lasso regression and internal tuning grid in xgboost method
+  - Comparing RMSE through visualization and Predicted vs Actual Plots for both methods 
+  
+- **Interpretability & Exploratory Data Analysis** 
+  - Variable Importance Plot for XGBoost 
+  - Predicted vs Actual Plot for Lasso 
+  - Model RMSE Comparison plot 
+  - ALE Plot for top 5 features in Lasso
+  
+- **Feature Enginerring**
+  - Lagged Air Quality variables 
+  - Computed total tobacco use rate 
+
+
+## III. Bootstrapping & Lasso Regularized Regression 
+
+To begin with, I will use the median imputation method to account for missing data 
+
+```{r}
+library(caret)
+pre_proc <- preProcess(data, method = "medianImpute")
+data_imputed <- predict(pre_proc, data)
+```
+
+
+Model implementation
+```{r}
+library(glmnet)
+## preparing data 
+X <- data_imputed %>% select(-tbl_deaths,-tbl_rate,-male_tobacco_perc,-female_tobacco_perc,-population)
+Y <- data_imputed$tbl_rate
+set.seed(2017)
+
+## Specifying number of bootstrap samples
+boot_lasso_rmse <- c()
+B <- 100  
+
+##implementing
+X_mm <- model.matrix(~., data = X)[,-1] ##dealing with test & training sets not having the same number of columns
+
+for (i in 1:B) {
+  indices <- sample(1:nrow(X_mm), replace = TRUE)
+  
+  x_boot <- X_mm[indices, ]
+  y_boot <- Y[indices]
+
+  # Use rows NOT in indices for test set
+  test_indices <- setdiff(1:nrow(X_mm), unique(indices))
+  if (length(test_indices) == 0) next # skip if no out-of-bag
+  
+  x_test <- X_mm[test_indices, ]
+  y_test <- Y[test_indices]
+
+  cv_lasso <- cv.glmnet(x_boot, y_boot, alpha = 1)
+  best_lambda <- cv_lasso$lambda.min
+
+  preds <- predict(cv_lasso, s = best_lambda, newx = x_test)
+  rmse <- sqrt(mean((y_test - preds)^2, na.rm = TRUE))
+  boot_lasso_rmse[i] <- rmse
+}
+
+mean_lasso_rmse <- mean(boot_lasso_rmse)
+mean_lasso_rmse
+
+```
+
+The Root Mean-Squared error is quite low particularly given that the minimum TBL death rate is ~1%. 
+
+Actual v/s Predicted Plot
+```{r}
+
+lasso_preds <- predict(cv_lasso, s = best_lambda, newx = X_mm)
+
+plot_df <- data.frame(
+  Actual = Y,
+  Predicted = as.vector(lasso_preds)
+)
+
+ggplot(plot_df, aes(x = Actual, y = Predicted)) +
+  geom_point(color = "dodgerblue", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "darkred") +
+  labs(
+    title = "Predicted vs Actual: Lasso Regression",
+    x = "Actual Lung Cancer Deaths",
+    y = "Predicted Lung Cancer Deaths"
+  ) +
+  theme_minimal()
+
+```
+The Predicted deaths appear close to the actual data in the figure above, predictive accuracy ability appears to reduce as towards the higher-tail of the data distribution 
+
+## IV. XGBOOST Model
+
+Set-up
+```{r}
+library(xgboost)
+set.seed(2017)
+
+## setting new matrices since the last one relied on data imputation
+X_xgb <- data %>% select(-tbl_deaths,-tbl_rate,-male_tobacco_perc,-female_tobacco_perc,-population,-State)
+Y_xgb <- data$tbl_rate
+
+##XGBoost can handle NA values in X matrice but not in Y, so I will modify the dataset accordingly 
+
+non_na <- which(!is.na(Y_xgb) & is.finite(Y_xgb))
+
+X_xgb_clean <- X_xgb[non_na, ]
+Y_xgb_clean <- Y_xgb[non_na]
+
+# Step 3: Create model matrix (for XGBoost) from the filtered X
+X_num <- model.matrix(~., data = X_xgb_clean)[,-1]
+
+```
+
+Implementation
+```{r}
+boot_xgb_rmse <- c()
+B <- 100  ##number of bootstrap samples
+
+for (i in 1:B) {
+  indices <- sample(1:nrow(X_num), replace = TRUE)
+  train_indices <- indices
+  test_indices <- setdiff(1:nrow(X_num), unique(train_indices))
+  
+  if (length(test_indices) == 0) next
+  
+  dtrain <- xgb.DMatrix(data = X_num[train_indices, ], label = Y_xgb_clean[train_indices])
+  dtest <- xgb.DMatrix(data = X_num[test_indices, ], label = Y_xgb_clean[test_indices])
+  
+  params <- list(
+    objective = "reg:squarederror",
+    eta = 0.1,
+    max_depth = 3,
+    subsample = 0.8
+  )
+  
+  xgb_fit <- xgb.train(params, dtrain, nrounds = 100, verbose = 0)
+  preds <- predict(xgb_fit, dtest)
+  
+  rmse <- sqrt(mean((Y_xgb_clean[test_indices] - preds)^2, na.rm = TRUE))
+  boot_xgb_rmse[i] <- rmse
+}
+
+
+mean_xgb_rmse <- mean(boot_xgb_rmse)
+mean_xgb_rmse
+```
+I removed the state variable as XGBOOST only works with numerical matrices. Losing this variable does not impact model accuracy or prediction as my goal is to predict tbl rate for the entire country, and factors that distinguish states are captured in the data through population, HALE and total_tobacco_rate. 
+
+XGBoost depicts a higher,nearly four times the RMSE than the lasso regression model. It is important to note that the Lasso model relies on imputed data, which is very likely inaccurate while XGBoost deals with the missing, but real data ( a smaller dataset too). 
+
+Variable Importance Plot
+```{r}
+importance_matrix <- xgb.importance(model = xgb_fit)
+xgb.plot.importance(importance_matrix, top_n = 10, main = "XGBoost Variable Importance Plot")
+```
+For the XGBoost analysis, it appears that air quality, particularly PM2.5 levels from the previous year contribute highly to determining tbl death rates. Followed by state structural factors like health-adjusted life expectancy at birth. SO2 and NO2 levels at t are also important followed by t-1 lag PM 10 level. Total tobacco usage rate also contributes highly to this model. Overall, this result depicts that air quality measures indeed have a strong effect on tracheal, bronchus and lung cancer death rates in India. 
+
+## V. Model Comparison 
+
+```{r}
+rmse_results <- data.frame(
+  Model = c("Bootstrapped Lasso", "Bootstrapped XGBoost"),
+  RMSE = c(mean_lasso_rmse, mean_xgb_rmse)
+)
+
+ggplot(rmse_results, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Model Comparison (Average RMSE)",
+       y = "RMSE",
+       x = "") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+As seen before, average RSME is much higher for the XGBoost Model. Therefore I will predict the next 5 years of tbl death rate using the lasso model.  
+
+
+
+For interpretability, we can use use an ALE plot for Lasso
+
+```{r}
+library(iml)
+predictor <- Predictor$new(
+  model = cv_lasso,
+  data = as.data.frame(X_mm),
+  y = Y,
+  predict.function = function(model, newdata) {
+    mat <- as.matrix(newdata)
+    train_cols <- colnames(X_mm)
+    missing_cols <- setdiff(train_cols, colnames(mat))
+    if(length(missing_cols) > 0) {
+      for (mc in missing_cols) {
+        mat <- cbind(mat, 0)
+        colnames(mat)[ncol(mat)] <- mc
+      }
+    }
+    mat <- mat[, train_cols, drop = FALSE]
+    predict(model, newx = mat, s = model$lambda.min)[,1]
+  }
+)
+
+top_features <- importance_matrix$Feature[1:5]
+for (feature in top_features) {
+  ale <- FeatureEffect$new(predictor, feature = feature, method = "ale")
+  print(plot(ale) + ggtitle(paste("ALE Plot for", feature)))
+}
+
+
+```
+
+The ALE Plot indicates that the top relevant features for the lasso model are lagged PM2.5, HALE and lagged PM 10. This makes sense since HALE seeks to represent the health outcomes of the population of a state. PM 2.5 lagged values prove to be important to both models as well as lagged PM10 values illustrating the impact of AQI on death rates. This relationship is also upward sloping indicating a positive relationship. 
+
+## VII. Implementation & Monitoring 
+
+**Implementation:**
+Based on the results,implementing the Lasso model would be ideal due to its low RMSE. The model can be implemented on new external data,e.g., Nigeria's state-level air quality and lung cancer death rates, in order to predict death rates in the future. The model can be re-trained using more Indian data as well. Eventually, with a new set of Indian data this model could predict the tracheal,bronchus and lung cancer death rates for the country in the future. 
+However, given that Lasso works off imputed data, if XGBoost was re-trained on better and more data it could likely have an improved performance and can also be implemented. 
+
+**Monitoring:**
+Quarterly performance reviews via RMSE comparisons and periodic recalibration with the discussed updated data.
+
+
+
